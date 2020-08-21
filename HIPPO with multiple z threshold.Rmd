@@ -1,0 +1,207 @@
+---
+title: "Pancrea_GSE84133"
+output: html_document
+---
+Description: compute and visualize HIPPO for different z threshold; parallelized computation using library snow 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+```
+
+## Download the latest HIPPO
+## Download GSE84133 Data
+
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE84133
+
+GSE84133 has multiple batches (both human and mouse) of scRNA-seq data of pancrea tissue. You can download from the above URL under the Supplementary file, "GSE84133_RAW.tar". Download and unzip it. 
+
+
+```{r, cache=TRUE}
+#### set up ####
+library(Matrix)
+library(data.table)
+library(SingleCellExperiment)
+library(SC3)
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(HIPPO)
+library(mclust)
+library(parallel)
+library(MASS)
+library(snow)
+```
+
+extracting data
+```{r, cache=TRUE}
+gse84133makesce = function(filename){
+  X = read.csv(paste0("C:/Users/lfang/Desktop/working directory for R/GSE84133_RAW/",filename,".csv"))
+  Xnew = as.matrix(X[, -c(1:3)])
+  rownames(Xnew) = X$barcode
+  ind = which(duplicated(X$barcode))
+  sce = SingleCellExperiment(assays = list(counts = t(Xnew)))
+  colData(sce)$phenoid = X$assigned_cluster
+  colData(sce)$barcode = X$barcode
+  if(length(ind)>0){
+    sce = sce[, -ind]
+  }
+  tablabel = table(colData(sce)$phenoid)
+  ind = names(tablabel)[which(tablabel<=3)]
+  cellind = which(colData(sce)$phenoid %in% ind)
+  sce = sce[, -cellind]
+  rm(X, Xnew)
+  return(sce)
+}
+```
+
+```{r, cache=TRUE}
+X1 = gse84133makesce("GSM2230757_human1_umifm_counts")
+#X2 = gse84133makesce("GSM2230758_human2_umifm_counts")
+```
+parallel processing framework 
+```{r}
+# z=vector('list',4)
+# z=1:4
+# system.time(lapply(z,function(x) Sys.sleep(1)))
+# cl<-makeCluster(8,type="SOCK")
+# system.time(clusterApply(cl, z,function(x) Sys.sleep(1)))
+```
+
+defining functions
+```{r}
+rand_VS_z<-function(data2, z){#outputs randindex for different z and k 
+  
+   hippo_z<-function(X, z){
+    X=hippo(X,  
+          feature_method="zero_inflation",
+          clustering_method="kmeans", 
+          K=12,
+          z_threshold=z)
+    X=hippo_dimension_reduction(X, method="tsne")
+  }
+
+  ARI<-function(data, k){#ARI outputs adjusted rand index with diff k 
+  truelabel = colData(data)$phenoid
+  adjustedRandIndex(truelabel,get_hippo(data)$labelmatrix[,k])
+    }
+  ARI<-Vectorize(ARI, "k") 
+  
+  data2=hippo_z(data2, z)
+  cat("hippo done for z value", z)
+  return(ARI(data2, c(2:12)))
+}
+
+###
+RandIndexDataset<-function(z_thresh){
+  return (rand_VS_z(X1, z_thresh))
+}
+
+###
+```
+
+prepping parallel computing 
+```{r}
+numCores=detectCores()
+cl<-makeCluster(11,type="SOCK")
+registerDoParallel(cl)
+
+clusterExport(cl,c("rand_VS_z", "hippo", "X1", "hippo_dimension_reduction", "adjustedRandIndex", "colData", "get_hippo"), envir = .GlobalEnv)
+
+z_threshold=c(0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75)
+
+```
+
+```{r}
+set.seed(35)
+
+parLapply(cl, z_threshold, RandIndexDataset)
+#if no seed/bad seed (eg setseed36) runs into "下标出界" at times 
+
+#system.time(parLapply(cl, z_threshold, RandIndexDataset)) 
+#用户,系统,流逝 0.50,0.65, 676.93 
+```
+
+for loop system time 
+```{r}
+# system.time(
+#    for (i in c(1:7)){
+#     cat(i)
+#      RandIndexDataset(z_threshold[i])
+#  })
+#2855.97   16.07 3341.14 
+```
+
+## Run HIPPO 
+
+"SC3" tries clustering under multiple settings and combines the result to get the consensus result. Be prepared to run the algorithm for a long time, possibly up to an hour, when you use SC3. You need one extra parameter called sc_n_cores, which determines the number of cores in your local machine (laptop) to use. My laptop crashed in the middle when I tried 3, so maybe play with 1 or 2. You can try more if you have a good laptop.
+
+plotting using ggplot2
+```{r}
+ggplot(data=RZdataframe, aes(x=c(2:12))) +
+  geom_line(aes(y=unlist(RZdataframe[1])))+
+  geom_line(aes(y=unlist(RZdataframe[2])))+
+  geom_line(aes(y=unlist(RZdataframe[3])))+
+  geom_line(aes(y=unlist(RZdataframe[4])))+
+  geom_line(aes(y=unlist(RZdataframe[5])))+
+  geom_line(aes(y=unlist(RZdataframe[6])))+
+  geom_line(aes(y=unlist(RZdataframe[7])))
+#yuck 
+```
+
+plotting using plot function 
+```{r, cache=TRUE}
+set.seed(35)
+#create plot 
+
+#plotting data for first z threshold value
+plot(c(1:ncol(rand_VS_z_data)), rand_VS_z_data[,1], type="l", col=1, 
+     ylim=c(min(rand_VS_z_data), max(rand_VS_z_data)), 
+     main="comparing different z threshold across multiple k values", 
+     ylab="Rand Index",
+     xlab="number of clusters",
+     xaxt="n")
+
+axis(1, at=1:ncol(rand_VS_z_data), lab=c(2:(l+1)))#adding one to x-values 1... n 
+#to find corresponding k values 2...n+1 
+
+#adding all other z threshold data
+for (i in 2:ncol(rand_VS_z_data)){
+lines(c(1:length(diff_z_thres[1,])), diff_z_thres[i,], type="l", col=i)
+}
+
+legend(9, 0.5, legend=z_threshold, title="z threshold value",
+       col=c(1:7), lty=1, cex=0.8)
+#dev.copy(pdf,'myplot.pdf')
+#dev.off()
+
+```
+
+Code for visualizing tsne result:
+
+tsnedf1 = get_hippo(X1)$tsne[1:ncol(X1), 1:2]
+tsnedf1 = tsnedf1 %>% mutate(truelabel = colData(X1)$phenoid) %>%
+  mutate(hippolabel = as.factor(get_hippo(X1)$labelmatrix[,10]))
+
+ggplot(tsnedf1, aes(x = tsne1, 
+                   y = tsne2, 
+                   col = truelabel, 
+                   shape = hippolabel)) +
+  geom_point()
+
+```{r}
+X2 = hippo(X2, 
+           feature_method = "zero_inflation", #play with this parameter
+           clustering_method = "SC3", #play with this parameter
+           K=3,
+           z_threshold = 1) #play with this parameter
+```
+
+
+```{r}
+X3 = gse84133makesce("GSM2230759_human3_umifm_counts")
+X3 = hippo(X3, ...)
+```
